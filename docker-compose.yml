@@ -6,7 +6,7 @@ services:
     ports:
       - "5050:5000"
     volumes:
-      - /mnt/dutchman/data/media/courses:/app/courses:ro
+      - /path/to/your/courses:/app/courses:ro
       - ./configs/courseview:/app/data
     environment:
       - TZ=America/Chicago
