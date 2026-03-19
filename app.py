@@ -1,9 +1,11 @@
 import os
 import re
 import json
+import struct
 import sqlite3
 import hashlib
 import secrets
+import subprocess
 from pathlib import Path
 from functools import wraps
 from datetime import datetime
@@ -726,10 +728,62 @@ def api_search():
     return jsonify(results[:50])
 
 
+def _needs_faststart(path):
+    """Check if MP4 file has moov atom after mdat (needs faststart)."""
+    if path.suffix.lower() not in ('.mp4', '.m4v', '.mov'):
+        return False
+    try:
+        with open(path, 'rb') as f:
+            while True:
+                header = f.read(8)
+                if len(header) < 8:
+                    break
+                size = struct.unpack('>I', header[:4])[0]
+                atom_type = header[4:8]
+                if atom_type == b'moov':
+                    return False  # moov before mdat — already faststart
+                if atom_type == b'mdat':
+                    return True   # mdat before moov — needs faststart
+                if size == 1:  # 64-bit extended size
+                    ext = f.read(8)
+                    if len(ext) < 8:
+                        break
+                    size = struct.unpack('>Q', ext)[0]
+                    f.seek(size - 16, 1)
+                elif size == 0:
+                    break  # atom extends to EOF
+                else:
+                    f.seek(size - 8, 1)
+    except (OSError, struct.error):
+        pass
+    return False
+
+
 @app.route('/video/<path:filepath>')
 @login_required
 def serve_video(filepath):
     video_path = resolve_file_in_libraries(filepath, session['user_id'], VIDEO_EXTENSIONS)
+
+    # If moov atom is at the end, pipe through ffmpeg to fix on the fly
+    if _needs_faststart(video_path):
+        mime = _get_mime(video_path)
+        process = subprocess.Popen(
+            ['ffmpeg', '-i', str(video_path), '-c', 'copy', '-movflags', '+faststart', '-f', 'mp4', 'pipe:1'],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+
+        def stream():
+            try:
+                while True:
+                    chunk = process.stdout.read(65536)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                process.stdout.close()
+                process.wait()
+
+        return app.response_class(stream(), mimetype=mime)
 
     file_size = video_path.stat().st_size
     range_header = request.headers.get('Range')
