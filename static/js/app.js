@@ -541,6 +541,25 @@
         });
     }
 
+    // Auto-scroll during drag
+    let dragScrollInterval = null;
+    function startDragScroll(e) {
+        const sidebar = el('course-sidebar');
+        const rect = sidebar.getBoundingClientRect();
+        const y = e.clientY - rect.top;
+        const scrollZone = 60;
+
+        if (dragScrollInterval) clearInterval(dragScrollInterval);
+        if (y < scrollZone) {
+            dragScrollInterval = setInterval(() => sidebar.scrollTop -= 8, 16);
+        } else if (y > rect.height - scrollZone) {
+            dragScrollInterval = setInterval(() => sidebar.scrollTop += 8, 16);
+        }
+    }
+    function stopDragScroll() {
+        if (dragScrollInterval) { clearInterval(dragScrollInterval); dragScrollInterval = null; }
+    }
+
     function onDragStart(e) {
         dragItem = this;
         dragType = 'lesson';
@@ -559,6 +578,7 @@
         if (dragType !== 'lesson') return;
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
+        startDragScroll(e);
         // Only allow drop within same parent section
         if (this !== dragItem && this.parentElement === dragItem.parentElement) {
             this.classList.add('drag-over');
@@ -569,6 +589,7 @@
         if (dragType !== 'section') return;
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
+        startDragScroll(e);
         const targetSection = this.closest('.tree-section');
         if (targetSection !== dragItem && targetSection.parentElement === dragItem.parentElement) {
             targetSection.classList.add('drag-over');
@@ -619,6 +640,7 @@
     }
 
     function onDragEnd() {
+        stopDragScroll();
         if (dragItem) dragItem.classList.remove('dragging');
         el('lesson-list').querySelectorAll('.lesson-item, .tree-section').forEach(i => i.classList.remove('drag-over'));
         dragItem = null;
@@ -739,6 +761,7 @@
 
         const videoUrl = `/video/${encodePath(course.path)}/${encodePath(lesson.path)}`;
         video.src = videoUrl;
+        video.pause();
 
         while (video.firstChild) video.removeChild(video.firstChild);
         if (lesson.subtitles) {
@@ -1528,6 +1551,7 @@
     el('tag-done-btn').addEventListener('click', () => {
         closeModal();
         loadDashboard();
+        runCompatScan();
     });
 
     // --- Keyboard Shortcuts ---
@@ -1795,6 +1819,512 @@
         document.documentElement.setAttribute('data-density', density || 'comfortable');
     }
 
+    // --- Transcode Manager ---
+
+    let transcodeFiles = [];
+
+    el('transcode-scan-btn').addEventListener('click', async () => {
+        const btn = el('transcode-scan-btn');
+        btn.disabled = true;
+        btn.textContent = 'Scanning...';
+        el('transcode-msg').classList.add('hidden');
+
+        const data = await api('/api/transcode/scan');
+        btn.disabled = false;
+        btn.textContent = 'Scan Library';
+
+        if (!data || !data.files) return;
+        transcodeFiles = data.files;
+
+        if (data.files.length === 0) {
+            showMsg('transcode-msg', 'All videos are browser-compatible!', false);
+            el('transcode-list').innerHTML = '';
+            el('transcode-all-btn').classList.add('hidden');
+            el('transcode-accept-all-btn').classList.add('hidden');
+        } else {
+            showMsg('transcode-msg', `Found ${data.files.length} incompatible video(s)`, true);
+            el('transcode-all-btn').classList.remove('hidden');
+            renderTranscodeList();
+        }
+
+        // Show accept-all if any have transcoded versions ready
+        const hasReady = data.files.some(f => f.has_transcoded);
+        el('transcode-accept-all-btn').classList.toggle('hidden', !hasReady);
+
+        // Trash
+        loadTrash();
+    });
+
+    const collapsedTranscodeFolders = new Set();
+
+    function buildTranscodeTree(files) {
+        const root = { name: '', children: {}, files: [] };
+        files.forEach((f, idx) => {
+            const parts = f.path.split('/');
+            let node = root;
+            // All segments except the last are folders
+            for (let i = 0; i < parts.length - 1; i++) {
+                const seg = parts[i];
+                if (!node.children[seg]) {
+                    node.children[seg] = { name: seg, children: {}, files: [], id: parts.slice(0, i + 1).join('/') };
+                }
+                node = node.children[seg];
+            }
+            node.files.push({ ...f, _idx: idx });
+        });
+        return root;
+    }
+
+    function countFolderFiles(node) {
+        let total = node.files.length;
+        for (const child of Object.values(node.children)) {
+            total += countFolderFiles(child);
+        }
+        return total;
+    }
+
+    function collectFolderIndices(node) {
+        const indices = node.files.map(f => f._idx);
+        for (const child of Object.values(node.children)) {
+            indices.push(...collectFolderIndices(child));
+        }
+        return indices;
+    }
+
+    function renderTranscodeNode(node, depth) {
+        let html = '';
+        const sortedChildren = Object.values(node.children).sort((a, b) => a.name.localeCompare(b.name));
+
+        for (const child of sortedChildren) {
+            const count = countFolderFiles(child);
+            const collapsed = collapsedTranscodeFolders.has(child.id);
+            const chevron = collapsed ? '&#9654;' : '&#9660;';
+            html += `
+                <div class="transcode-folder" data-depth="${depth}">
+                    <div class="transcode-folder-header" data-folder-id="${esc(child.id)}" style="padding-left:${depth * 20}px">
+                        <span class="transcode-folder-chevron">${chevron}</span>
+                        <span class="transcode-folder-name">${esc(child.name)}</span>
+                        <span class="transcode-folder-count">${count}</span>
+                        <button class="settings-btn-sm transcode-folder-batch" data-folder-id="${esc(child.id)}">Transcode All</button>
+                    </div>
+                    <div class="transcode-folder-children${collapsed ? ' hidden' : ''}">
+                        ${renderTranscodeNode(child, depth + 1)}
+                        ${child.files.map(f => renderTranscodeFile(f, depth + 1)).join('')}
+                    </div>
+                </div>`;
+        }
+
+        // Files at this level (root level or within a folder)
+        if (depth === 0) {
+            html += node.files.map(f => renderTranscodeFile(f, depth)).join('');
+        }
+
+        return html;
+    }
+
+    function renderTranscodeFile(f, depth) {
+        const i = f._idx;
+        let status = '';
+        let actions = '';
+        if (f.has_transcoded) {
+            status = '<span class="transcode-status transcode-ready">Ready to verify</span>';
+            actions = `
+                <button class="settings-btn-sm settings-btn-accent transcode-preview" data-idx="${i}">Preview</button>
+                <button class="settings-btn-sm transcode-accept" data-idx="${i}">Accept</button>
+                <button class="settings-btn-sm settings-btn-danger transcode-reject" data-idx="${i}">Reject</button>`;
+        } else {
+            status = `<span class="transcode-status">${esc(f.codec)}</span>`;
+            actions = `<button class="settings-btn-sm transcode-start" data-idx="${i}">Transcode</button>`;
+        }
+        const fileName = f.path.split('/').pop();
+        return `
+            <div class="transcode-item" data-idx="${i}" style="padding-left:${depth * 20}px">
+                <div class="transcode-file-info">
+                    <span class="transcode-path">${esc(fileName)}</span>
+                    <span class="transcode-size">${f.size_mb} MB</span>
+                    ${status}
+                </div>
+                <div class="transcode-actions-row">${actions}</div>
+            </div>`;
+    }
+
+    function renderTranscodeList() {
+        const list = el('transcode-list');
+        const tree = buildTranscodeTree(transcodeFiles);
+        list.innerHTML = renderTranscodeNode(tree, 0);
+
+        // Folder collapse toggle
+        list.querySelectorAll('.transcode-folder-header').forEach(header => {
+            header.addEventListener('click', (e) => {
+                if (e.target.closest('.transcode-folder-batch')) return;
+                const folderId = header.dataset.folderId;
+                const childrenEl = header.nextElementSibling;
+                if (collapsedTranscodeFolders.has(folderId)) {
+                    collapsedTranscodeFolders.delete(folderId);
+                    childrenEl.classList.remove('hidden');
+                    header.querySelector('.transcode-folder-chevron').innerHTML = '&#9660;';
+                } else {
+                    collapsedTranscodeFolders.add(folderId);
+                    childrenEl.classList.add('hidden');
+                    header.querySelector('.transcode-folder-chevron').innerHTML = '&#9654;';
+                }
+            });
+        });
+
+        // Folder batch transcode
+        list.querySelectorAll('.transcode-folder-batch').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const folderId = btn.dataset.folderId;
+                const node = findTranscodeNode(buildTranscodeTree(transcodeFiles), folderId);
+                if (!node) return;
+                const indices = collectFolderIndices(node).filter(i => !transcodeFiles[i].has_transcoded);
+                btn.disabled = true;
+                btn.textContent = `Transcoding 0/${indices.length}...`;
+                for (let j = 0; j < indices.length; j++) {
+                    btn.textContent = `Transcoding ${j + 1}/${indices.length}...`;
+                    await startTranscode(indices[j]);
+                }
+                btn.disabled = false;
+                btn.textContent = 'Transcode All';
+            });
+        });
+
+        // File action buttons
+        list.querySelectorAll('.transcode-start').forEach(btn => {
+            btn.addEventListener('click', () => startTranscode(parseInt(btn.dataset.idx)));
+        });
+        list.querySelectorAll('.transcode-preview').forEach(btn => {
+            btn.addEventListener('click', () => openTranscodePreview(parseInt(btn.dataset.idx)));
+        });
+        list.querySelectorAll('.transcode-accept').forEach(btn => {
+            btn.addEventListener('click', () => acceptTranscode(parseInt(btn.dataset.idx)));
+        });
+        list.querySelectorAll('.transcode-reject').forEach(btn => {
+            btn.addEventListener('click', () => rejectTranscode(parseInt(btn.dataset.idx)));
+        });
+    }
+
+    function findTranscodeNode(tree, folderId) {
+        for (const child of Object.values(tree.children)) {
+            if (child.id === folderId) return child;
+            const found = findTranscodeNode(child, folderId);
+            if (found) return found;
+        }
+        return null;
+    }
+
+    async function startTranscode(idx) {
+        const f = transcodeFiles[idx];
+        const item = el('transcode-list').querySelector(`[data-idx="${idx}"]`);
+        const actionsRow = item.querySelector('.transcode-actions-row');
+        actionsRow.innerHTML = `
+            <div class="transcode-progress-wrap">
+                <div class="transcode-progress-bar"><div class="transcode-progress-fill" style="width:0%"></div></div>
+                <span class="transcode-progress-pct">0%</span>
+            </div>`;
+
+        const res = await api('/api/transcode/start', {
+            method: 'POST',
+            body: { path: f.path, library: f.library },
+        });
+        if (!res || res.error) {
+            actionsRow.innerHTML = `<span class="transcode-status transcode-error">${esc(res?.error || 'Failed')}</span>`;
+            return;
+        }
+
+        // Poll for completion with progress
+        const taskKey = res.task_key;
+        const poll = setInterval(async () => {
+            const status = await api('/api/transcode/status', {
+                method: 'POST',
+                body: { task_key: taskKey },
+            });
+            if (!status) return;
+            if (status.status === 'running') {
+                const pct = status.percent || 0;
+                const fill = actionsRow.querySelector('.transcode-progress-fill');
+                const label = actionsRow.querySelector('.transcode-progress-pct');
+                if (fill) fill.style.width = pct + '%';
+                if (label) label.textContent = pct + '%';
+            } else if (status.status === 'complete') {
+                clearInterval(poll);
+                f.has_transcoded = true;
+                renderTranscodeList();
+                el('transcode-accept-all-btn').classList.remove('hidden');
+            } else if (status.status === 'error') {
+                clearInterval(poll);
+                actionsRow.innerHTML = `<span class="transcode-status transcode-error">Error</span>`;
+            }
+        }, 1500);
+    }
+
+    async function acceptTranscode(idx) {
+        const f = transcodeFiles[idx];
+        await api('/api/transcode/accept', {
+            method: 'POST',
+            body: { path: f.path, library: f.library },
+        });
+        transcodeFiles.splice(idx, 1);
+        renderTranscodeList();
+        updateCompatBadge(transcodeFiles.length);
+        loadTrash();
+        if (transcodeFiles.length === 0) {
+            showMsg('transcode-msg', 'All videos transcoded and accepted!', false);
+            el('transcode-all-btn').classList.add('hidden');
+            el('transcode-accept-all-btn').classList.add('hidden');
+        }
+    }
+
+    async function rejectTranscode(idx) {
+        const f = transcodeFiles[idx];
+        await api('/api/transcode/reject', {
+            method: 'POST',
+            body: { path: f.path, library: f.library },
+        });
+        f.has_transcoded = false;
+        renderTranscodeList();
+    }
+
+    // Transcode all at once
+    el('transcode-all-btn').addEventListener('click', async () => {
+        for (let i = 0; i < transcodeFiles.length; i++) {
+            if (!transcodeFiles[i].has_transcoded) {
+                await startTranscode(i);
+            }
+        }
+    });
+
+    // Accept all completed transcodes
+    el('transcode-accept-all-btn').addEventListener('click', async () => {
+        const res = await api('/api/transcode/accept-all', { method: 'POST' });
+        if (res && res.ok) {
+            showMsg('transcode-msg', `Accepted ${res.accepted} transcode(s)`, false);
+            el('transcode-scan-btn').click();
+        }
+    });
+
+    // --- Trash ---
+    let trashFiles = [];
+    const collapsedTrashFolders = new Set();
+    let trashExpanded = false;
+
+    async function loadTrash() {
+        const data = await api('/api/transcode/trash');
+        if (!data) return;
+        trashFiles = data.files || [];
+        const trashEl = el('transcode-trash');
+        if (trashFiles.length === 0) {
+            trashEl.classList.add('hidden');
+            return;
+        }
+        trashEl.classList.remove('hidden');
+        el('transcode-trash-summary').textContent = `${trashFiles.length} file(s), ${data.total_size_mb} MB`;
+        renderTrashList();
+    }
+
+    function buildTrashTree(files) {
+        const root = { name: '', children: {}, files: [] };
+        files.forEach((f, idx) => {
+            const parts = f.path.split('/');
+            let node = root;
+            for (let i = 0; i < parts.length - 1; i++) {
+                const seg = parts[i];
+                if (!node.children[seg]) {
+                    node.children[seg] = { name: seg, children: {}, files: [], id: parts.slice(0, i + 1).join('/') };
+                }
+                node = node.children[seg];
+            }
+            node.files.push({ ...f, _idx: idx });
+        });
+        return root;
+    }
+
+    function renderTrashNode(node, depth) {
+        let html = '';
+        const sortedChildren = Object.values(node.children).sort((a, b) => a.name.localeCompare(b.name));
+        for (const child of sortedChildren) {
+            const collapsed = collapsedTrashFolders.has(child.id);
+            const chevron = collapsed ? '&#9654;' : '&#9660;';
+            html += `
+                <div class="transcode-folder" data-depth="${depth}">
+                    <div class="trash-folder-header" data-folder-id="${esc(child.id)}" style="padding-left:${depth * 20}px">
+                        <span class="transcode-folder-chevron">${chevron}</span>
+                        <span class="transcode-folder-name">${esc(child.name)}</span>
+                    </div>
+                    <div class="transcode-folder-children${collapsed ? ' hidden' : ''}">
+                        ${renderTrashNode(child, depth + 1)}
+                        ${child.files.map(f => renderTrashFile(f, depth + 1)).join('')}
+                    </div>
+                </div>`;
+        }
+        if (depth === 0) {
+            html += node.files.map(f => renderTrashFile(f, depth)).join('');
+        }
+        return html;
+    }
+
+    function renderTrashFile(f, depth) {
+        const fileName = f.path.split('/').pop();
+        return `
+            <div class="transcode-item trash-item" data-trash-idx="${f._idx}" style="padding-left:${depth * 20}px">
+                <div class="transcode-file-info">
+                    <span class="transcode-path">${esc(fileName)}</span>
+                    <span class="transcode-size">${f.size_mb} MB</span>
+                </div>
+                <div class="transcode-actions-row">
+                    <button class="settings-btn-sm trash-restore" data-trash-idx="${f._idx}">Restore</button>
+                </div>
+            </div>`;
+    }
+
+    function renderTrashList() {
+        const list = el('transcode-trash-list');
+        const tree = buildTrashTree(trashFiles);
+        list.innerHTML = renderTrashNode(tree, 0);
+
+        // Folder collapse toggle
+        list.querySelectorAll('.trash-folder-header').forEach(header => {
+            header.addEventListener('click', () => {
+                const folderId = header.dataset.folderId;
+                const childrenEl = header.nextElementSibling;
+                if (collapsedTrashFolders.has(folderId)) {
+                    collapsedTrashFolders.delete(folderId);
+                    childrenEl.classList.remove('hidden');
+                    header.querySelector('.transcode-folder-chevron').innerHTML = '&#9660;';
+                } else {
+                    collapsedTrashFolders.add(folderId);
+                    childrenEl.classList.add('hidden');
+                    header.querySelector('.transcode-folder-chevron').innerHTML = '&#9654;';
+                }
+            });
+        });
+
+        // Restore buttons
+        list.querySelectorAll('.trash-restore').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const idx = parseInt(btn.dataset.trashIdx);
+                const f = trashFiles[idx];
+                const res = await api('/api/transcode/trash/restore', {
+                    method: 'POST',
+                    body: { path: f.path, library: f.library },
+                });
+                if (res && res.ok) {
+                    trashFiles.splice(idx, 1);
+                    if (trashFiles.length === 0) {
+                        el('transcode-trash').classList.add('hidden');
+                    } else {
+                        el('transcode-trash-summary').textContent = `${trashFiles.length} file(s)`;
+                        renderTrashList();
+                    }
+                }
+            });
+        });
+    }
+
+    // Toggle trash list visibility
+    el('transcode-trash-toggle').addEventListener('click', (e) => {
+        if (e.target.closest('#transcode-empty-trash-btn')) return;
+        trashExpanded = !trashExpanded;
+        el('transcode-trash-list').classList.toggle('hidden', !trashExpanded);
+        el('transcode-trash-toggle').querySelector('.transcode-trash-chevron').innerHTML = trashExpanded ? '&#9660;' : '&#9654;';
+    });
+
+    // Empty trash
+    el('transcode-empty-trash-btn').addEventListener('click', async () => {
+        const res = await api('/api/transcode/cleanup', { method: 'POST' });
+        if (res && res.ok) {
+            showMsg('transcode-msg', `Deleted ${res.deleted} backup file(s)`, false);
+            trashFiles = [];
+            el('transcode-trash').classList.add('hidden');
+            el('transcode-trash-list').innerHTML = '';
+        }
+    });
+
+    // Transcode preview modal
+    let previewIdx = -1;
+
+    function openTranscodePreview(idx) {
+        const f = transcodeFiles[idx];
+        previewIdx = idx;
+        const overlay = el('transcode-preview-overlay');
+        const originalVideo = el('transcode-original');
+        const newVideo = el('transcode-new');
+
+        el('transcode-preview-title').textContent = f.path.split('/').pop();
+
+        // Original video (mpeg4 — will show black but audio plays)
+        originalVideo.src = `/video/${encodePath(f.path)}`;
+        // Transcoded version
+        newVideo.src = `/video/preview-transcode/${encodePath(f.path)}`;
+
+        overlay.classList.remove('hidden');
+        requestAnimationFrame(() => overlay.classList.add('visible'));
+    }
+
+    function closeTranscodePreview() {
+        const overlay = el('transcode-preview-overlay');
+        overlay.classList.remove('visible');
+        overlay.classList.add('hidden');
+        el('transcode-original').pause();
+        el('transcode-original').src = '';
+        el('transcode-new').pause();
+        el('transcode-new').src = '';
+        previewIdx = -1;
+    }
+
+    el('transcode-preview-close').addEventListener('click', closeTranscodePreview);
+    el('transcode-preview-overlay').addEventListener('click', (e) => {
+        if (e.target === el('transcode-preview-overlay')) closeTranscodePreview();
+    });
+
+    el('transcode-preview-accept').addEventListener('click', async () => {
+        if (previewIdx >= 0) {
+            closeTranscodePreview();
+            await acceptTranscode(previewIdx);
+        }
+    });
+
+    el('transcode-preview-reject').addEventListener('click', async () => {
+        if (previewIdx >= 0) {
+            closeTranscodePreview();
+            await rejectTranscode(previewIdx);
+        }
+    });
+
+    // --- Compat Badge ---
+
+    function updateCompatBadge(count) {
+        const btn = el('compat-badge-btn');
+        const badge = btn.querySelector('.compat-badge-count');
+        if (count > 0) {
+            badge.textContent = count;
+            btn.classList.remove('hidden');
+        } else {
+            btn.classList.add('hidden');
+        }
+    }
+
+    async function runCompatScan() {
+        const data = await api('/api/transcode/scan');
+        if (data && data.files) {
+            updateCompatBadge(data.files.length);
+        }
+    }
+
+    el('compat-badge-btn').addEventListener('click', async () => {
+        if (state.currentCourse) {
+            saveProgress();
+            video.pause();
+        }
+        await loadSettings();
+        // Scroll to video compatibility section and trigger scan
+        setTimeout(() => {
+            const section = el('transcode-scan-btn').closest('.settings-section');
+            if (section) section.scrollIntoView({ behavior: 'smooth' });
+            el('transcode-scan-btn').click();
+        }, 100);
+    });
+
     // --- Init ---
 
     async function init() {
@@ -1809,6 +2339,7 @@
             }
         }
         loadDashboard();
+        runCompatScan();
     }
 
     init();

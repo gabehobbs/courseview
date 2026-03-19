@@ -1,11 +1,11 @@
 import os
 import re
 import json
-import struct
 import sqlite3
 import hashlib
 import secrets
 import subprocess
+import tempfile
 from pathlib import Path
 from functools import wraps
 from datetime import datetime
@@ -580,14 +580,14 @@ def api_courses():
 def api_continue():
     db = get_db()
     user_id = session['user_id']
-    # Get the most recently watched lesson per course (no duplicates)
+    # Get most recently watched course (one entry per course, no duplicates)
     rows = db.execute('''
         SELECT p.course_path, p.lesson_path, p.position, p.duration, p.last_watched
         FROM progress p
         INNER JOIN (
             SELECT course_path, MAX(last_watched) as max_watched
             FROM progress
-            WHERE user_id = ? AND completed = 0 AND position > 0
+            WHERE user_id = ?
             GROUP BY course_path
         ) latest ON p.course_path = latest.course_path AND p.last_watched = latest.max_watched
         WHERE p.user_id = ?
@@ -728,62 +728,21 @@ def api_search():
     return jsonify(results[:50])
 
 
-def _needs_faststart(path):
-    """Check if MP4 file has moov atom after mdat (needs faststart)."""
-    if path.suffix.lower() not in ('.mp4', '.m4v', '.mov'):
-        return False
-    try:
-        with open(path, 'rb') as f:
-            while True:
-                header = f.read(8)
-                if len(header) < 8:
-                    break
-                size = struct.unpack('>I', header[:4])[0]
-                atom_type = header[4:8]
-                if atom_type == b'moov':
-                    return False  # moov before mdat — already faststart
-                if atom_type == b'mdat':
-                    return True   # mdat before moov — needs faststart
-                if size == 1:  # 64-bit extended size
-                    ext = f.read(8)
-                    if len(ext) < 8:
-                        break
-                    size = struct.unpack('>Q', ext)[0]
-                    f.seek(size - 16, 1)
-                elif size == 0:
-                    break  # atom extends to EOF
-                else:
-                    f.seek(size - 8, 1)
-    except (OSError, struct.error):
-        pass
-    return False
+@app.route('/video/preview-transcode/<path:filepath>')
+@login_required
+def serve_transcode_preview(filepath):
+    """Serve the .transcoded.mp4 version of a file for quality verification."""
+    video_path = resolve_file_in_libraries(filepath, session['user_id'], VIDEO_EXTENSIONS)
+    transcoded_path = video_path.with_suffix('.transcoded.mp4')
+    if not transcoded_path.exists():
+        abort(404)
+    return send_file(transcoded_path)
 
 
 @app.route('/video/<path:filepath>')
 @login_required
 def serve_video(filepath):
     video_path = resolve_file_in_libraries(filepath, session['user_id'], VIDEO_EXTENSIONS)
-
-    # If moov atom is at the end, pipe through ffmpeg to fix on the fly
-    if _needs_faststart(video_path):
-        mime = _get_mime(video_path)
-        process = subprocess.Popen(
-            ['ffmpeg', '-i', str(video_path), '-c', 'copy', '-movflags', '+faststart', '-f', 'mp4', 'pipe:1'],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        )
-
-        def stream():
-            try:
-                while True:
-                    chunk = process.stdout.read(65536)
-                    if not chunk:
-                        break
-                    yield chunk
-            finally:
-                process.stdout.close()
-                process.wait()
-
-        return app.response_class(stream(), mimetype=mime)
 
     file_size = video_path.stat().st_size
     range_header = request.headers.get('Range')
@@ -1121,6 +1080,331 @@ def _get_mime(path):
         '.m4v': 'video/mp4',
     }
     return mimes.get(path.suffix.lower(), 'application/octet-stream')
+
+
+# Browser-supported video codecs
+BROWSER_VIDEO_CODECS = {'h264', 'vp8', 'vp9', 'av1', 'theora'}
+
+
+def _get_video_codec(path):
+    """Get video codec name using ffprobe."""
+    try:
+        result = subprocess.run(
+            ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+             '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', str(path)],
+            capture_output=True, text=True, timeout=10
+        )
+        return result.stdout.strip().lower() if result.returncode == 0 else None
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+
+
+def _get_video_duration(path):
+    """Get video duration in seconds using ffprobe."""
+    try:
+        result = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+             '-of', 'csv=p=0', str(path)],
+            capture_output=True, text=True, timeout=10
+        )
+        return float(result.stdout.strip()) if result.returncode == 0 else 0
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+        return 0
+
+
+# Track active transcode processes
+_active_transcodes = {}
+
+
+@app.route('/api/transcode/scan')
+@login_required
+def api_transcode_scan():
+    """Scan all libraries for videos with browser-incompatible codecs."""
+    user_id = session['user_id']
+    lib_paths = get_library_paths(user_id)
+    incompatible = []
+
+    for lib_path in lib_paths:
+        if not lib_path.exists():
+            continue
+        for video_file in lib_path.rglob('*'):
+            if not video_file.is_file():
+                continue
+            if video_file.suffix.lower() not in VIDEO_EXTENSIONS:
+                continue
+            if video_file.name.startswith('.') or '.transcoded' in video_file.name:
+                continue
+
+            codec = _get_video_codec(video_file)
+            if codec and codec not in BROWSER_VIDEO_CODECS:
+                rel = str(video_file.relative_to(lib_path))
+                transcoded = video_file.with_suffix('.transcoded.mp4')
+                backup = video_file.with_name(video_file.name + '.bak')
+                size_mb = round(video_file.stat().st_size / (1024 * 1024), 1)
+                incompatible.append({
+                    'path': rel,
+                    'library': str(lib_path),
+                    'codec': codec,
+                    'size_mb': size_mb,
+                    'has_transcoded': transcoded.exists(),
+                    'has_backup': backup.exists(),
+                })
+
+    # Also count backups for cleanup
+    backup_count = 0
+    backup_size = 0
+    for lib_path in lib_paths:
+        if not lib_path.exists():
+            continue
+        for bak in lib_path.rglob('*.bak'):
+            if bak.is_file():
+                backup_count += 1
+                backup_size += bak.stat().st_size
+
+    return jsonify({
+        'files': incompatible,
+        'backup_count': backup_count,
+        'backup_size_mb': round(backup_size / (1024 * 1024), 1),
+    })
+
+
+@app.route('/api/transcode/start', methods=['POST'])
+@login_required
+def api_transcode_start():
+    """Start transcoding a single file to H.264."""
+    validate_csrf()
+    data = request.json
+    rel_path = data.get('path', '')
+    library = data.get('library', '')
+
+    if not rel_path or not library:
+        return jsonify({'error': 'Missing path or library'}), 400
+
+    lib_path = Path(library)
+    video_path = safe_path(lib_path, rel_path)
+    if not video_path.exists():
+        return jsonify({'error': 'File not found'}), 404
+
+    transcoded_path = video_path.with_suffix('.transcoded.mp4')
+    if transcoded_path.exists():
+        return jsonify({'error': 'Transcoded file already exists'}), 409
+
+    task_key = str(video_path)
+    if task_key in _active_transcodes:
+        return jsonify({'error': 'Already transcoding'}), 409
+
+    # Get duration for progress tracking
+    duration = _get_video_duration(video_path)
+
+    # Create temp file for ffmpeg progress output
+    progress_file = tempfile.NamedTemporaryFile(mode='w', suffix='.log', delete=False)
+    progress_path = progress_file.name
+    progress_file.close()
+
+    # Start ffmpeg with -progress flag writing to temp file
+    process = subprocess.Popen(
+        ['ffmpeg', '-i', str(video_path), '-c:v', 'libx264', '-crf', '18',
+         '-preset', 'medium', '-c:a', 'copy', '-movflags', '+faststart',
+         '-progress', progress_path, '-y', str(transcoded_path)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    _active_transcodes[task_key] = {
+        'process': process,
+        'duration': duration,
+        'progress_file': progress_path,
+    }
+
+    return jsonify({'ok': True, 'task_key': task_key})
+
+
+@app.route('/api/transcode/status', methods=['POST'])
+@login_required
+def api_transcode_status():
+    """Check status of a transcode job."""
+    validate_csrf()
+    data = request.json
+    task_key = data.get('task_key', '')
+
+    if task_key not in _active_transcodes:
+        return jsonify({'status': 'unknown'})
+
+    task = _active_transcodes[task_key]
+    process = task['process']
+    poll = process.poll()
+
+    if poll is None:
+        # Still running — parse progress file for percentage
+        percent = 0
+        try:
+            with open(task['progress_file'], 'r') as f:
+                content = f.read()
+            # Find last out_time_us (microseconds) in progress output
+            matches = re.findall(r'out_time_us=(\d+)', content)
+            if matches and task['duration'] > 0:
+                current_us = int(matches[-1])
+                current_secs = current_us / 1_000_000
+                percent = min(99, round((current_secs / task['duration']) * 100))
+        except (OSError, ValueError):
+            pass
+        return jsonify({'status': 'running', 'percent': percent})
+
+    # Done — clean up
+    progress_path = task['progress_file']
+    del _active_transcodes[task_key]
+    try:
+        os.unlink(progress_path)
+    except OSError:
+        pass
+
+    if poll == 0:
+        return jsonify({'status': 'complete'})
+    else:
+        return jsonify({'status': 'error', 'message': 'Transcode failed'})
+
+
+@app.route('/api/transcode/accept', methods=['POST'])
+@login_required
+def api_transcode_accept():
+    """Accept a transcode: rename original to .bak, rename .transcoded to original."""
+    validate_csrf()
+    data = request.json
+    rel_path = data.get('path', '')
+    library = data.get('library', '')
+
+    lib_path = Path(library)
+    video_path = safe_path(lib_path, rel_path)
+    transcoded_path = video_path.with_suffix('.transcoded.mp4')
+
+    if not transcoded_path.exists():
+        return jsonify({'error': 'No transcoded file found'}), 404
+
+    backup_path = video_path.with_name(video_path.name + '.bak')
+    video_path.rename(backup_path)
+    transcoded_path.rename(video_path)
+
+    return jsonify({'ok': True})
+
+
+@app.route('/api/transcode/reject', methods=['POST'])
+@login_required
+def api_transcode_reject():
+    """Reject a transcode: delete the .transcoded file."""
+    validate_csrf()
+    data = request.json
+    rel_path = data.get('path', '')
+    library = data.get('library', '')
+
+    lib_path = Path(library)
+    video_path = safe_path(lib_path, rel_path)
+    transcoded_path = video_path.with_suffix('.transcoded.mp4')
+
+    if transcoded_path.exists():
+        transcoded_path.unlink()
+
+    return jsonify({'ok': True})
+
+
+@app.route('/api/transcode/cleanup', methods=['POST'])
+@login_required
+def api_transcode_cleanup():
+    """Delete all .bak backup files across libraries."""
+    validate_csrf()
+    user_id = session['user_id']
+    lib_paths = get_library_paths(user_id)
+    deleted = 0
+
+    for lib_path in lib_paths:
+        if not lib_path.exists():
+            continue
+        for bak in lib_path.rglob('*.bak'):
+            if bak.is_file():
+                bak.unlink()
+                deleted += 1
+
+    return jsonify({'ok': True, 'deleted': deleted})
+
+
+@app.route('/api/transcode/accept-all', methods=['POST'])
+@login_required
+def api_transcode_accept_all():
+    """Accept all completed transcodes."""
+    validate_csrf()
+    user_id = session['user_id']
+    lib_paths = get_library_paths(user_id)
+    accepted = 0
+
+    for lib_path in lib_paths:
+        if not lib_path.exists():
+            continue
+        for transcoded in lib_path.rglob('*.transcoded.mp4'):
+            if not transcoded.is_file():
+                continue
+            # Find the original file
+            original_name = transcoded.name.replace('.transcoded.mp4', '.mp4')
+            original = transcoded.parent / original_name
+            if original.exists():
+                backup = original.with_name(original.name + '.bak')
+                original.rename(backup)
+                transcoded.rename(original)
+                accepted += 1
+
+    return jsonify({'ok': True, 'accepted': accepted})
+
+
+@app.route('/api/transcode/trash')
+@login_required
+def api_transcode_trash():
+    """List all .bak backup files across libraries."""
+    user_id = session['user_id']
+    lib_paths = get_library_paths(user_id)
+    files = []
+    total_size = 0
+
+    for lib_path in lib_paths:
+        if not lib_path.exists():
+            continue
+        for bak in lib_path.rglob('*.bak'):
+            if not bak.is_file():
+                continue
+            size = bak.stat().st_size
+            total_size += size
+            rel = str(bak.relative_to(lib_path))
+            files.append({
+                'path': rel,
+                'library': str(lib_path),
+                'size_mb': round(size / (1024 * 1024), 1),
+            })
+
+    return jsonify({
+        'files': files,
+        'total_size_mb': round(total_size / (1024 * 1024), 1),
+    })
+
+
+@app.route('/api/transcode/trash/restore', methods=['POST'])
+@login_required
+def api_transcode_trash_restore():
+    """Restore a .bak file back to its original name."""
+    validate_csrf()
+    data = request.json
+    rel_path = data.get('path', '')
+    library = data.get('library', '')
+
+    lib_path = Path(library)
+    bak_path = safe_path(lib_path, rel_path)
+
+    if not bak_path.exists() or not bak_path.name.endswith('.bak'):
+        return jsonify({'error': 'Backup file not found'}), 404
+
+    # Original name is the .bak name without the .bak suffix
+    original_path = bak_path.with_name(bak_path.name[:-4])
+
+    # If a transcoded replacement exists at the original path, remove it
+    if original_path.exists():
+        original_path.unlink()
+
+    bak_path.rename(original_path)
+    return jsonify({'ok': True})
 
 
 with app.app_context():

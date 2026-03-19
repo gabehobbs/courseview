@@ -74,6 +74,10 @@
                 </button>
                 <div id="breadcrumb" class="breadcrumb"></div>
                 <div class="topbar-actions">
+                    <button id="compat-badge-btn" class="compat-badge-btn hidden" title="Incompatible videos found">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                        <span class="compat-badge-count">0</span>
+                    </button>
                     <button id="add-course-btn" class="add-course-btn" title="Add course">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                     </button>
@@ -278,12 +282,63 @@
                             </div>
                         </div>
                     </div>
+
+                    <!-- Video Compatibility Section -->
+                    <div class="settings-section">
+                        <h2 class="settings-section-title">Video Compatibility</h2>
+                        <p class="settings-description">Scan your library for videos using codecs that browsers can't play (e.g. MPEG-4 Part 2). Transcode them to H.264 for full browser support.</p>
+                        <div class="settings-card">
+                            <div class="transcode-actions">
+                                <button id="transcode-scan-btn" class="settings-btn">Scan Library</button>
+                                <button id="transcode-all-btn" class="settings-btn settings-btn-accent hidden">Transcode All</button>
+                                <button id="transcode-accept-all-btn" class="settings-btn settings-btn-accent hidden">Accept All</button>
+                            </div>
+                            <div id="transcode-msg" class="settings-msg hidden"></div>
+                            <div id="transcode-list" class="transcode-list"></div>
+                            <div id="transcode-trash" class="transcode-trash hidden">
+                                <div class="transcode-trash-header" id="transcode-trash-toggle">
+                                    <svg class="transcode-trash-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                                    <span class="transcode-trash-chevron">&#9654;</span>
+                                    <span>Trash</span>
+                                    <span id="transcode-trash-summary" class="transcode-trash-summary"></span>
+                                    <button id="transcode-empty-trash-btn" class="settings-btn-sm settings-btn-danger">Empty Trash</button>
+                                </div>
+                                <div id="transcode-trash-list" class="transcode-trash-list hidden"></div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </main>
     </div>
 
     <div id="sidebar-overlay" class="sidebar-overlay"></div>
+
+    <!-- Transcode Preview Modal -->
+    <div id="transcode-preview-overlay" class="modal-overlay hidden">
+        <div class="modal transcode-preview-modal">
+            <div class="modal-header">
+                <h2 id="transcode-preview-title">Preview Transcode</h2>
+                <button id="transcode-preview-close" class="icon-btn">&times;</button>
+            </div>
+            <div class="transcode-preview-body">
+                <div class="transcode-compare">
+                    <div class="transcode-compare-col">
+                        <h3>Original</h3>
+                        <video id="transcode-original" controls preload="metadata"></video>
+                    </div>
+                    <div class="transcode-compare-col">
+                        <h3>Transcoded (H.264)</h3>
+                        <video id="transcode-new" controls preload="metadata"></video>
+                    </div>
+                </div>
+                <div class="transcode-preview-actions">
+                    <button id="transcode-preview-accept" class="settings-btn settings-btn-accent">Accept</button>
+                    <button id="transcode-preview-reject" class="settings-btn-sm settings-btn-danger">Reject</button>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <!-- Add Course Modal -->
     <div id="modal-overlay" class="modal-overlay hidden">
