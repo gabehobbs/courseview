@@ -578,20 +578,28 @@ def api_courses():
 def api_continue():
     db = get_db()
     user_id = session['user_id']
+    # Get the most recently watched lesson per course (no duplicates)
     rows = db.execute('''
-        SELECT course_path, lesson_path, position, duration, last_watched
-        FROM progress
-        WHERE user_id = ? AND completed = 0 AND position > 0
-        ORDER BY last_watched DESC
+        SELECT p.course_path, p.lesson_path, p.position, p.duration, p.last_watched
+        FROM progress p
+        INNER JOIN (
+            SELECT course_path, MAX(last_watched) as max_watched
+            FROM progress
+            WHERE user_id = ? AND completed = 0 AND position > 0
+            GROUP BY course_path
+        ) latest ON p.course_path = latest.course_path AND p.last_watched = latest.max_watched
+        WHERE p.user_id = ?
+        ORDER BY p.last_watched DESC
         LIMIT 6
-    ''', (user_id,)).fetchall()
+    ''', (user_id, user_id)).fetchall()
 
     results = []
     for row in rows:
+        course_name = format_name(Path(row['course_path']).name)
         results.append({
             'course_path': row['course_path'],
             'lesson_path': row['lesson_path'],
-            'course_name': format_name(row['course_path']),
+            'course_name': course_name,
             'lesson_name': format_name(Path(row['lesson_path']).stem),
             'position': row['position'],
             'duration': row['duration'],

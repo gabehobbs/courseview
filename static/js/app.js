@@ -461,7 +461,6 @@
         });
         list.querySelectorAll('.tree-section-header').forEach(header => {
             header.addEventListener('click', (e) => {
-                if (state.reorderMode) return;
                 if (e.target.closest('.drag-handle')) return;
                 const sectionId = header.dataset.sectionId;
                 toggleSection(sectionId);
@@ -494,10 +493,6 @@
         el('reorder-controls').classList.remove('hidden');
         const list = el('lesson-list');
         list.classList.add('reorder-mode');
-
-        // Expand all sections for reordering
-        list.querySelectorAll('.tree-section-children.collapsed').forEach(c => c.classList.remove('collapsed'));
-        list.querySelectorAll('.collapse-arrow.collapsed').forEach(a => a.classList.remove('collapsed'));
 
         // Make lessons draggable
         list.querySelectorAll('.lesson-item').forEach(item => {
@@ -761,8 +756,6 @@
         if (prog && prog.position > 0 && !prog.completed) {
             video.currentTime = prog.position;
         }
-
-        video.play().catch(() => {});
     }
 
     function showDocument(lesson) {
