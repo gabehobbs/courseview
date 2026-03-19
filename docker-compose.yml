@@ -1,6 +1,6 @@
 services:
   courseview:
-    build: .
+    image: ghcr.io/gabehobbs/courseview:latest
     container_name: courseview
     restart: unless-stopped
     ports:
