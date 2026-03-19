@@ -4,6 +4,7 @@
     'use strict';
 
     const CSRF = window.__CSRF_TOKEN__;
+    const encodePath = p => p.split('/').map(encodeURIComponent).join('/');
     const state = {
         courses: [],
         currentCourse: null,
@@ -321,7 +322,7 @@
         `;
 
         // Load progress
-        state.progress = await api(`/api/progress/${encodeURIComponent(course.path)}`);
+        state.progress = await api(`/api/progress/${encodePath(course.path)}`);
 
         loadCollapseState(course.path);
         renderLessonList(course);
@@ -664,7 +665,7 @@
 
         const order = buildOrderFromDOM();
 
-        await api(`/api/lesson-order/${encodeURIComponent(course.path)}`, {
+        await api(`/api/lesson-order/${encodePath(course.path)}`, {
             method: 'PUT',
             body: { order },
         });
@@ -683,7 +684,7 @@
         const course = state.currentCourse;
         if (!course) return;
 
-        await api(`/api/lesson-order/${encodeURIComponent(course.path)}`, {
+        await api(`/api/lesson-order/${encodePath(course.path)}`, {
             method: 'DELETE',
         });
 
@@ -741,7 +742,7 @@
         playerControls.classList.remove('hidden');
         el('note-input').placeholder = 'Add a note at current timestamp...';
 
-        const videoUrl = `/video/${encodeURIComponent(course.path)}/${encodeURIComponent(lesson.path)}`;
+        const videoUrl = `/video/${encodePath(course.path)}/${encodePath(lesson.path)}`;
         video.src = videoUrl;
 
         while (video.firstChild) video.removeChild(video.firstChild);
@@ -750,7 +751,7 @@
                 const track = document.createElement('track');
                 track.kind = 'subtitles';
                 track.label = sub.lang || 'Default';
-                track.src = `/subtitle/${encodeURIComponent(sub.path)}`;
+                track.src = `/subtitle/${encodePath(sub.path)}`;
                 if (sub.ext === '.vtt') track.srclang = sub.lang || 'en';
                 video.appendChild(track);
             });
@@ -776,11 +777,11 @@
         if (lesson.format === 'pdf') {
             docPdfIframe.classList.remove('hidden');
             docTextContainer.classList.add('hidden');
-            docPdfIframe.src = `/document/${encodeURIComponent(course.path)}/${encodeURIComponent(lesson.path)}`;
+            docPdfIframe.src = `/document/${encodePath(course.path)}/${encodePath(lesson.path)}`;
         } else {
             docPdfIframe.classList.add('hidden');
             docTextContainer.classList.remove('hidden');
-            api(`/document/${encodeURIComponent(course.path)}/${encodeURIComponent(lesson.path)}`)
+            api(`/document/${encodePath(course.path)}/${encodePath(lesson.path)}`)
                 .then(data => {
                     if (!data) return;
                     if (lesson.format === 'markdown') {
@@ -1127,7 +1128,7 @@
         const lesson = state.currentLesson;
         if (!course || !lesson) return;
 
-        const notes = await api(`/api/notes/${encodeURIComponent(course.path)}/${encodeURIComponent(lesson.path)}`);
+        const notes = await api(`/api/notes/${encodePath(course.path)}/${encodePath(lesson.path)}`);
         renderNotes(notes || []);
     }
 
@@ -1435,7 +1436,7 @@
 
         // Load existing tags and all available tags
         const [courseTags, allTags] = await Promise.all([
-            api(`/api/courses/${encodeURIComponent(course.path)}/tags`),
+            api(`/api/courses/${encodePath(course.path)}/tags`),
             api('/api/tags'),
         ]);
 
@@ -1493,7 +1494,7 @@
 
         container.querySelectorAll('.tag-remove').forEach(btn => {
             btn.addEventListener('click', async () => {
-                await api(`/api/courses/${encodeURIComponent(currentTagCoursePath)}/tags/${btn.dataset.id}`, {
+                await api(`/api/courses/${encodePath(currentTagCoursePath)}/tags/${btn.dataset.id}`, {
                     method: 'DELETE',
                 });
                 // Refresh
@@ -1518,7 +1519,7 @@
         const value = input.value.trim();
         if (!value || !currentTagCoursePath) return;
 
-        const res = await api(`/api/courses/${encodeURIComponent(currentTagCoursePath)}/tags`, {
+        const res = await api(`/api/courses/${encodePath(currentTagCoursePath)}/tags`, {
             method: 'POST',
             body: { tag_type: type, tag_value: value },
         });
