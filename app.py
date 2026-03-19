@@ -12,7 +12,7 @@ from datetime import datetime
 
 from flask import (
     Flask, render_template, request, jsonify, session,
-    redirect, url_for, send_file, abort, g
+    redirect, url_for, send_file, abort, g, Response
 )
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -1119,23 +1119,38 @@ _active_transcodes = {}
 @app.route('/api/transcode/scan')
 @login_required
 def api_transcode_scan():
-    """Scan all libraries for videos with browser-incompatible codecs."""
+    """Scan all libraries for videos with browser-incompatible codecs.
+    Streams newline-delimited JSON so the frontend can show live progress.
+    Events: {type:'progress', scanned, total, found} and final {type:'done', files, backup_count, backup_size_mb}
+    """
     user_id = session['user_id']
     lib_paths = get_library_paths(user_id)
-    incompatible = []
 
-    for lib_path in lib_paths:
-        if not lib_path.exists():
-            continue
-        for video_file in lib_path.rglob('*'):
-            if not video_file.is_file():
+    def generate():
+        # First pass: collect all video files to get a total count
+        all_videos = []
+        for lib_path in lib_paths:
+            if not lib_path.exists():
                 continue
-            if video_file.suffix.lower() not in VIDEO_EXTENSIONS:
-                continue
-            if video_file.name.startswith('.') or '.transcoded' in video_file.name:
-                continue
+            for video_file in lib_path.rglob('*'):
+                if not video_file.is_file():
+                    continue
+                if video_file.suffix.lower() not in VIDEO_EXTENSIONS:
+                    continue
+                if video_file.name.startswith('.') or '.transcoded' in video_file.name:
+                    continue
+                all_videos.append((video_file, lib_path))
 
+        total = len(all_videos)
+        incompatible = []
+        scanned = 0
+
+        # Send initial count
+        yield json.dumps({'type': 'progress', 'scanned': 0, 'total': total, 'found': 0}) + '\n'
+
+        for video_file, lib_path in all_videos:
             codec = _get_video_codec(video_file)
+            scanned += 1
             if codec and codec not in BROWSER_VIDEO_CODECS:
                 rel = str(video_file.relative_to(lib_path))
                 transcoded = video_file.with_suffix('.transcoded.mp4')
@@ -1150,22 +1165,29 @@ def api_transcode_scan():
                     'has_backup': backup.exists(),
                 })
 
-    # Also count backups for cleanup
-    backup_count = 0
-    backup_size = 0
-    for lib_path in lib_paths:
-        if not lib_path.exists():
-            continue
-        for bak in lib_path.rglob('*.bak'):
-            if bak.is_file():
-                backup_count += 1
-                backup_size += bak.stat().st_size
+            # Send progress every 5 files or on last file
+            if scanned % 5 == 0 or scanned == total:
+                yield json.dumps({'type': 'progress', 'scanned': scanned, 'total': total, 'found': len(incompatible)}) + '\n'
 
-    return jsonify({
-        'files': incompatible,
-        'backup_count': backup_count,
-        'backup_size_mb': round(backup_size / (1024 * 1024), 1),
-    })
+        # Count backups
+        backup_count = 0
+        backup_size = 0
+        for lib_path in lib_paths:
+            if not lib_path.exists():
+                continue
+            for bak in lib_path.rglob('*.bak'):
+                if bak.is_file():
+                    backup_count += 1
+                    backup_size += bak.stat().st_size
+
+        yield json.dumps({
+            'type': 'done',
+            'files': incompatible,
+            'backup_count': backup_count,
+            'backup_size_mb': round(backup_size / (1024 * 1024), 1),
+        }) + '\n'
+
+    return Response(generate(), mimetype='application/x-ndjson')
 
 
 @app.route('/api/transcode/start', methods=['POST'])

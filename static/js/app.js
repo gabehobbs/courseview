@@ -1829,22 +1829,50 @@
         btn.textContent = 'Scanning...';
         el('transcode-msg').classList.add('hidden');
 
-        const data = await api('/api/transcode/scan');
-        btn.disabled = false;
-        btn.textContent = 'Scan Library';
+        try {
+            const resp = await fetch('/api/transcode/scan');
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let data = null;
 
-        if (!data || !data.files) return;
-        transcodeFiles = data.files;
+            while (true) {
+                const {done, value} = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, {stream: true});
+                const lines = buffer.split('\n');
+                buffer = lines.pop();
+                for (const line of lines) {
+                    if (!line.trim()) continue;
+                    const evt = JSON.parse(line);
+                    if (evt.type === 'progress') {
+                        btn.textContent = `Scanning... ${evt.scanned}/${evt.total} (${evt.found} incompatible)`;
+                    } else if (evt.type === 'done') {
+                        data = evt;
+                    }
+                }
+            }
 
-        if (data.files.length === 0) {
-            showMsg('transcode-msg', 'All videos are browser-compatible!', false);
-            el('transcode-list').innerHTML = '';
-            el('transcode-all-btn').classList.add('hidden');
-            el('transcode-accept-all-btn').classList.add('hidden');
-        } else {
-            showMsg('transcode-msg', `Found ${data.files.length} incompatible video(s)`, true);
-            el('transcode-all-btn').classList.remove('hidden');
-            renderTranscodeList();
+            btn.disabled = false;
+            btn.textContent = 'Scan Library';
+
+            if (!data || !data.files) return;
+            transcodeFiles = data.files;
+
+            if (data.files.length === 0) {
+                showMsg('transcode-msg', 'All videos are browser-compatible!', false);
+                el('transcode-list').innerHTML = '';
+                el('transcode-all-btn').classList.add('hidden');
+                el('transcode-accept-all-btn').classList.add('hidden');
+            } else {
+                showMsg('transcode-msg', `Found ${data.files.length} incompatible video(s)`, true);
+                el('transcode-all-btn').classList.remove('hidden');
+                renderTranscodeList();
+            }
+        } catch (e) {
+            btn.disabled = false;
+            btn.textContent = 'Scan Library';
+            console.error('Scan error:', e);
         }
 
         // Show accept-all if any have transcoded versions ready
