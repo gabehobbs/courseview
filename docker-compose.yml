@@ -1,0 +1,14 @@
+services:
+  courseview:
+    build: .
+    container_name: courseview
+    restart: unless-stopped
+    ports:
+      - "5050:5000"
+    volumes:
+      - /mnt/dutchman/data/media/courses:/app/courses:ro
+      - ./configs/courseview:/app/data
+    environment:
+      - TZ=America/Chicago
+      - COURSEVIEW_SECRET=change-this-to-a-random-secret-key
+    user: "568:568"
