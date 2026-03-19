@@ -238,39 +238,125 @@ body {
 .reorder-cancel-btn:hover { color: var(--text-primary); }
 
 /* Reorder mode */
-.lesson-list.reorder-mode .lesson-item {
+.lesson-list.reorder-mode .lesson-item,
+.lesson-list.reorder-mode .tree-section-header {
     cursor: grab;
     user-select: none;
 }
 
-.lesson-list.reorder-mode .lesson-item:active { cursor: grabbing; }
+.lesson-list.reorder-mode .lesson-item:active,
+.lesson-list.reorder-mode .tree-section-header:active { cursor: grabbing; }
 
-.lesson-list.reorder-mode .lesson-item .drag-handle {
+.lesson-list.reorder-mode .lesson-item .drag-handle,
+.lesson-list.reorder-mode .tree-section-header .drag-handle {
     display: flex;
     opacity: 0.4;
     flex-shrink: 0;
 }
 
-.lesson-item .drag-handle { display: none; }
+.lesson-item .drag-handle,
+.tree-section-header .drag-handle { display: none; }
 
 .lesson-item.drag-over {
     border-top: 2px solid var(--accent);
     margin-top: -2px;
 }
 
-.lesson-item.dragging {
+.tree-section.drag-over > .tree-section-header {
+    border-top: 2px solid var(--accent);
+    margin-top: -2px;
+}
+
+.lesson-item.dragging,
+.tree-section.dragging {
     opacity: 0.4;
 }
 
 .lesson-list { padding-top: 0.25rem; }
 
-.lesson-section-title {
-    font-size: 0.7rem;
+/* Tree view */
+.tree-section-header {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.5rem 0.5rem;
+    cursor: pointer;
+    border-radius: var(--radius-md);
+    transition: var(--transition);
+    user-select: none;
+}
+
+.tree-section-header:hover { background: var(--bg-hover); }
+
+.collapse-arrow {
+    flex-shrink: 0;
+    transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    color: var(--text-muted);
+}
+
+.collapse-arrow.collapsed {
+    transform: rotate(-90deg);
+}
+
+.tree-section-name {
+    font-size: 0.75rem;
     font-weight: 500;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tree-section-progress {
+    font-size: 0.65rem;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+}
+
+.tree-section-children {
+    overflow: hidden;
+    transition: max-height 0.2s ease;
+}
+
+.tree-section-children.collapsed {
+    display: none;
+}
+
+/* Provider groups on dashboard */
+.provider-group {
+    grid-column: 1 / -1;
+}
+
+.provider-heading {
+    font-size: 0.8rem;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
+    color: var(--text-secondary);
+    margin-bottom: 0.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.provider-category {
+    font-size: 0.65rem;
+    font-weight: 400;
     color: var(--text-muted);
-    padding: 0.75rem 0.65rem 0.35rem;
+    text-transform: none;
+    letter-spacing: 0;
+}
+
+.provider-courses {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 0.75rem;
+    margin-bottom: 1.5rem;
 }
 
 .lesson-item {

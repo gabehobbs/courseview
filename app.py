@@ -267,65 +267,116 @@ def scan_courses(user_id=None):
     for lib_path in lib_paths:
         if not lib_path.exists():
             continue
-        for entry in sorted(lib_path.iterdir(), key=lambda x: natural_sort_key(x.name)):
-            if entry.is_dir() and not entry.name.startswith('.'):
-                course = scan_course(entry, lib_path)
+        # Scan 3 levels deep: Category > Provider > Course
+        for cat_entry in sorted(lib_path.iterdir(), key=lambda x: natural_sort_key(x.name)):
+            if not cat_entry.is_dir() or cat_entry.name.startswith('.'):
+                continue
+            # Check if this is a flat structure (files directly in subdirs = old style)
+            # If cat_entry contains media files or its children do directly, treat as old-style
+            has_media = any(
+                f.suffix.lower() in VIDEO_EXTENSIONS | DOCUMENT_EXTENSIONS
+                for f in cat_entry.iterdir() if f.is_file()
+            )
+            if has_media:
+                # Old-style: direct subfolder is a course
+                course = scan_course(cat_entry, lib_path, category='', provider='')
                 if course['lessons']:
                     courses.append(course)
+                continue
+
+            for prov_entry in sorted(cat_entry.iterdir(), key=lambda x: natural_sort_key(x.name)):
+                if not prov_entry.is_dir() or prov_entry.name.startswith('.'):
+                    continue
+                # Check if provider dir has media directly (2-level structure)
+                has_media = any(
+                    f.suffix.lower() in VIDEO_EXTENSIONS | DOCUMENT_EXTENSIONS
+                    for f in prov_entry.iterdir() if f.is_file()
+                )
+                if has_media:
+                    course = scan_course(prov_entry, lib_path,
+                                         category=format_name(cat_entry.name), provider='')
+                    if course['lessons']:
+                        courses.append(course)
+                    continue
+
+                for course_entry in sorted(prov_entry.iterdir(), key=lambda x: natural_sort_key(x.name)):
+                    if not course_entry.is_dir() or course_entry.name.startswith('.'):
+                        continue
+                    course = scan_course(course_entry, lib_path,
+                                         category=format_name(cat_entry.name),
+                                         provider=format_name(prov_entry.name))
+                    if course['lessons']:
+                        courses.append(course)
 
     courses.sort(key=lambda x: natural_sort_key(x['name']))
     return courses
 
 
-def scan_course(course_dir, base_dir):
+def scan_course(course_dir, base_dir, category='', provider=''):
     rel_path = str(course_dir.relative_to(base_dir))
-    lessons = []
-    _scan_lessons(course_dir, course_dir, lessons, base_dir)
-    lessons.sort(key=lambda x: natural_sort_key(x['path']))
-
-    # Auto-detect parent folder as potential source hint
-    parent_hint = ''
-    rel = course_dir.relative_to(base_dir)
-    if len(rel.parts) > 1:
-        parent_hint = format_name(rel.parts[0])
+    tree = _scan_tree(course_dir, course_dir, base_dir)
+    lessons = _flatten_tree(tree)
 
     return {
         'path': rel_path,
         'name': format_name(course_dir.name),
         'lessons': lessons,
-        'sections': build_sections(lessons, course_dir),
+        'tree': tree,
         'library': str(base_dir),
-        'parent_hint': parent_hint,
+        'category': category,
+        'provider': provider,
     }
 
 
-def _scan_lessons(base_dir, current_dir, lessons, lib_dir):
+def _scan_tree(base_dir, current_dir, lib_dir):
+    """Build a recursive tree of sections and lessons."""
+    children = []
     for entry in sorted(current_dir.iterdir(), key=lambda x: natural_sort_key(x.name)):
         if entry.is_dir() and not entry.name.startswith('.'):
-            _scan_lessons(base_dir, entry, lessons, lib_dir)
+            subtree = _scan_tree(base_dir, entry, lib_dir)
+            if subtree:  # Only include sections that have content
+                section_id = str(entry.relative_to(base_dir))
+                children.append({
+                    'type': 'section',
+                    'id': section_id,
+                    'name': format_name(entry.name),
+                    'children': subtree,
+                })
         elif entry.is_file():
             suffix = entry.suffix.lower()
             if suffix in VIDEO_EXTENSIONS:
                 rel = str(entry.relative_to(base_dir))
                 subtitles = find_subtitles(entry, lib_dir)
-                lessons.append({
+                children.append({
+                    'type': 'lesson',
                     'path': rel,
                     'name': format_name(entry.stem),
-                    'section': str(entry.parent.relative_to(base_dir)) if entry.parent != base_dir else '',
                     'subtitles': subtitles,
-                    'type': 'video',
+                    'lessonType': 'video',
                 })
             elif suffix in DOCUMENT_EXTENSIONS:
                 rel = str(entry.relative_to(base_dir))
                 fmt = {'.pdf': 'pdf', '.md': 'markdown', '.txt': 'text'}[suffix]
-                lessons.append({
+                children.append({
+                    'type': 'lesson',
                     'path': rel,
                     'name': format_name(entry.stem),
-                    'section': str(entry.parent.relative_to(base_dir)) if entry.parent != base_dir else '',
                     'subtitles': [],
-                    'type': 'document',
+                    'lessonType': 'document',
                     'format': fmt,
                 })
+    return children
+
+
+def _flatten_tree(tree):
+    """Depth-first flatten of tree into ordered lesson list."""
+    lessons = []
+    for node in tree:
+        if node['type'] == 'section':
+            lessons.extend(_flatten_tree(node['children']))
+        else:
+            lessons.append(node)
+    return lessons
 
 
 def find_subtitles(video_path, lib_dir):
@@ -344,14 +395,83 @@ def find_subtitles(video_path, lib_dir):
     return subs
 
 
-def build_sections(lessons, course_dir):
-    sections = {}
-    for lesson in lessons:
-        sec = lesson['section'] or 'Root'
-        if sec not in sections:
-            sections[sec] = {'name': format_name(Path(sec).name) if sec != 'Root' else '', 'lessons': []}
-        sections[sec]['lessons'].append(lesson)
-    return sections
+def _add_tree_progress(tree, progress_set):
+    """Recursively add completed/total counts to section nodes."""
+    for node in tree:
+        if node['type'] == 'section':
+            _add_tree_progress(node['children'], progress_set)
+            total = _count_lessons(node['children'])
+            completed = _count_completed(node['children'], progress_set)
+            node['total'] = total
+            node['completed'] = completed
+        # lessons don't need counts
+
+
+def _count_lessons(tree):
+    count = 0
+    for node in tree:
+        if node['type'] == 'section':
+            count += _count_lessons(node['children'])
+        else:
+            count += 1
+    return count
+
+
+def _count_completed(tree, progress_set):
+    count = 0
+    for node in tree:
+        if node['type'] == 'section':
+            count += _count_completed(node['children'], progress_set)
+        elif node['path'] in progress_set:
+            count += 1
+    return count
+
+
+def _apply_tree_order(tree, order_data):
+    """Apply saved ordering to tree in-place. order_data has section_order and lesson_orders."""
+    section_order = order_data.get('section_order', {})
+    lesson_orders = order_data.get('lesson_orders', {})
+
+    def reorder_children(children, parent_id):
+        sections = [c for c in children if c['type'] == 'section']
+        lessons = [c for c in children if c['type'] == 'lesson']
+
+        # Reorder sections if we have an order for this parent
+        if parent_id in section_order:
+            order = section_order[parent_id]
+            sec_by_name = {}
+            for s in sections:
+                # Use the folder name (last part of id) for matching
+                sec_by_name[s['id'].split('/')[-1] if '/' in s['id'] else s['id']] = s
+            ordered_secs = []
+            for name in order:
+                if name in sec_by_name:
+                    ordered_secs.append(sec_by_name.pop(name))
+            # Append any new sections not in saved order
+            ordered_secs.extend(sec_by_name.values())
+            sections = ordered_secs
+
+        # Reorder lessons if we have an order for this parent
+        if parent_id in lesson_orders:
+            order = lesson_orders[parent_id]
+            les_by_path = {l['path']: l for l in lessons}
+            ordered_les = []
+            for path in order:
+                if path in les_by_path:
+                    ordered_les.append(les_by_path.pop(path))
+            ordered_les.extend(les_by_path.values())
+            lessons = ordered_les
+
+        # Recurse into sections
+        for sec in sections:
+            reorder_children(sec['children'], sec['id'])
+
+        # Rebuild children: sections first, then lessons (or interleaved based on original)
+        children.clear()
+        children.extend(sections)
+        children.extend(lessons)
+
+    reorder_children(tree, '')
 
 
 def format_name(name):
@@ -418,16 +538,20 @@ def api_courses():
     for course in courses:
         # Apply custom lesson order if exists
         if course['path'] in orders_by_course:
-            saved_order = orders_by_course[course['path']]
-            lessons_by_path = {l['path']: l for l in course['lessons']}
-            ordered = [lessons_by_path[p] for p in saved_order if p in lessons_by_path]
-            # Append any new lessons not in saved order
-            ordered_set = set(saved_order)
-            for l in course['lessons']:
-                if l['path'] not in ordered_set:
-                    ordered.append(l)
-            course['lessons'] = ordered
-            course['sections'] = build_sections(ordered, course['path'])
+            saved = orders_by_course[course['path']]
+            if isinstance(saved, dict):
+                # New structured format
+                _apply_tree_order(course['tree'], saved)
+                course['lessons'] = _flatten_tree(course['tree'])
+            elif isinstance(saved, list):
+                # Legacy flat format - reorder flat lessons
+                lessons_by_path = {l['path']: l for l in course['lessons']}
+                ordered = [lessons_by_path[p] for p in saved if p in lessons_by_path]
+                ordered_set = set(saved)
+                for l in course['lessons']:
+                    if l['path'] not in ordered_set:
+                        ordered.append(l)
+                course['lessons'] = ordered
             course['custom_order'] = True
         else:
             course['custom_order'] = False
@@ -436,11 +560,14 @@ def api_courses():
         if total == 0:
             course['progress'] = 0
         else:
-            completed = db.execute(
-                'SELECT COUNT(*) FROM progress WHERE user_id = ? AND course_path = ? AND completed = 1',
+            completed_rows = db.execute(
+                'SELECT lesson_path FROM progress WHERE user_id = ? AND course_path = ? AND completed = 1',
                 (user_id, course['path'])
-            ).fetchone()[0]
-            course['progress'] = round((completed / total) * 100)
+            ).fetchall()
+            progress_set = {r['lesson_path'] for r in completed_rows}
+            course['progress'] = round((len(progress_set) / total) * 100)
+            # Add progress counts to tree sections
+            _add_tree_progress(course['tree'], progress_set)
         course['tags'] = tags_by_course.get(course['path'], {'sources': [], 'categories': []})
 
     return jsonify(courses)
@@ -861,15 +988,15 @@ def api_get_lesson_order(course_path):
 def api_save_lesson_order(course_path):
     validate_csrf()
     data = request.json
-    ordered_paths = data.get('order', [])
-    if not isinstance(ordered_paths, list):
+    order = data.get('order')
+    if not isinstance(order, (list, dict)):
         return jsonify({'error': 'Invalid order'}), 400
 
     db = get_db()
     db.execute(
         'INSERT INTO lesson_order (user_id, course_path, ordered_paths) VALUES (?, ?, ?) '
         'ON CONFLICT(user_id, course_path) DO UPDATE SET ordered_paths = excluded.ordered_paths',
-        (session['user_id'], course_path, json.dumps(ordered_paths))
+        (session['user_id'], course_path, json.dumps(order))
     )
     db.commit()
     return jsonify({'ok': True})

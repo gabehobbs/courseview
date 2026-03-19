@@ -182,8 +182,29 @@
         // Build tagged rows (Netflix-style)
         renderTaggedRows(courses);
 
-        // All courses grid
-        coursesGrid.innerHTML = courses.map(c => renderCourseCard(c)).join('');
+        // All courses grid — grouped by provider
+        const byProvider = {};
+        const ungrouped = [];
+        courses.forEach(c => {
+            if (c.provider) {
+                if (!byProvider[c.provider]) byProvider[c.provider] = [];
+                byProvider[c.provider].push(c);
+            } else {
+                ungrouped.push(c);
+            }
+        });
+
+        let gridHtml = '';
+        Object.keys(byProvider).sort().forEach(provider => {
+            gridHtml += `<div class="provider-group">
+                <h2 class="provider-heading">${esc(provider)}${byProvider[provider][0].category ? `<span class="provider-category">${esc(byProvider[provider][0].category)}</span>` : ''}</h2>
+                <div class="provider-courses">${byProvider[provider].map(c => renderCourseCard(c)).join('')}</div>
+            </div>`;
+        });
+        if (ungrouped.length) {
+            gridHtml += ungrouped.map(c => renderCourseCard(c)).join('');
+        }
+        coursesGrid.innerHTML = gridHtml;
         bindCourseCards(coursesGrid);
     }
 
@@ -302,6 +323,7 @@
         // Load progress
         state.progress = await api(`/api/progress/${encodeURIComponent(course.path)}`);
 
+        loadCollapseState(course.path);
         renderLessonList(course);
 
         // Auto-play lesson
@@ -348,54 +370,114 @@
         docTextContent.innerHTML = '';
     }
 
+    // Collapse state per course
+    state.collapsedSections = new Set();
+
+    function loadCollapseState(coursePath) {
+        try {
+            const key = `cv_collapsed_${coursePath}`;
+            const saved = localStorage.getItem(key);
+            state.collapsedSections = saved ? new Set(JSON.parse(saved)) : new Set();
+        } catch { state.collapsedSections = new Set(); }
+    }
+
+    function saveCollapseState(coursePath) {
+        const key = `cv_collapsed_${coursePath}`;
+        localStorage.setItem(key, JSON.stringify([...state.collapsedSections]));
+    }
+
+    function toggleSection(sectionId) {
+        if (state.collapsedSections.has(sectionId)) {
+            state.collapsedSections.delete(sectionId);
+        } else {
+            state.collapsedSections.add(sectionId);
+        }
+        saveCollapseState(state.currentCourse.path);
+    }
+
+    function expandToLesson(lessonPath) {
+        // Find all ancestor section IDs for this lesson and expand them
+        const parts = lessonPath.split('/');
+        for (let i = 1; i < parts.length; i++) {
+            const ancestorId = parts.slice(0, i).join('/');
+            state.collapsedSections.delete(ancestorId);
+        }
+        saveCollapseState(state.currentCourse.path);
+    }
+
     function renderLessonList(course) {
         const list = el('lesson-list');
+        loadCollapseState(course.path);
+        let flatIndex = { i: 0 };
+        list.innerHTML = renderTreeNodes(course.tree, 0, flatIndex);
+        bindLessonListEvents(list);
+    }
+
+    function renderTreeNodes(nodes, depth, flatIndex) {
         let html = '';
-        let currentSection = null;
-
-        for (let i = 0; i < course.lessons.length; i++) {
-            const lesson = course.lessons[i];
-            const prog = state.progress[lesson.path];
-            const completed = prog && prog.completed;
-            const section = lesson.section || '';
-
-            if (section !== currentSection) {
-                currentSection = section;
-                if (section) html += `<div class="lesson-section-title">${esc(formatSectionName(section))}</div>`;
-            }
-
-            const docIcon = lesson.type === 'document'
-                ? '<span class="lesson-type-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></span>'
-                : '';
-
-            html += `
-                <button class="lesson-item${i === state.currentLessonIndex ? ' active' : ''}" data-index="${i}" data-path="${esc(lesson.path)}" draggable="false">
+        for (const node of nodes) {
+            if (node.type === 'section') {
+                const collapsed = state.collapsedSections.has(node.id);
+                const total = node.total || 0;
+                const completed = node.completed || 0;
+                html += `<div class="tree-section" data-section-id="${esc(node.id)}">
+                    <div class="tree-section-header" data-section-id="${esc(node.id)}" style="padding-left:${depth * 1}rem" draggable="false">
+                        <span class="drag-handle section-drag-handle"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="5" r="1.5"/><circle cx="15" cy="5" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="19" r="1.5"/><circle cx="15" cy="19" r="1.5"/></svg></span>
+                        <svg class="collapse-arrow${collapsed ? ' collapsed' : ''}" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+                        <span class="tree-section-name">${esc(node.name)}</span>
+                        <span class="tree-section-progress">${completed}/${total}</span>
+                    </div>
+                    <div class="tree-section-children${collapsed ? ' collapsed' : ''}">
+                        ${renderTreeNodes(node.children, depth + 1, flatIndex)}
+                    </div>
+                </div>`;
+            } else {
+                const prog = state.progress[node.path];
+                const isCompleted = prog && prog.completed;
+                const isActive = flatIndex.i === state.currentLessonIndex;
+                const docIcon = node.lessonType === 'document'
+                    ? '<span class="lesson-type-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></span>'
+                    : '';
+                html += `<button class="lesson-item${isActive ? ' active' : ''}" data-index="${flatIndex.i}" data-path="${esc(node.path)}" style="padding-left:${(depth * 1) + 0.5}rem" draggable="false">
                     <span class="drag-handle"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="5" r="1.5"/><circle cx="15" cy="5" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="19" r="1.5"/><circle cx="15" cy="19" r="1.5"/></svg></span>
-                    <span class="check${completed ? ' completed' : ''}">
+                    <span class="check${isCompleted ? ' completed' : ''}">
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
                     </span>
                     ${docIcon}
-                    <span>${esc(lesson.name)}</span>
+                    <span>${esc(node.name)}</span>
                 </button>`;
+                flatIndex.i++;
+            }
         }
+        return html;
+    }
 
-        list.innerHTML = html;
+    function bindLessonListEvents(list) {
         list.querySelectorAll('.lesson-item').forEach(item => {
             item.addEventListener('click', () => {
                 if (!state.reorderMode) playLesson(parseInt(item.dataset.index));
             });
         });
-    }
-
-    function formatSectionName(path) {
-        const name = path.split('/').pop();
-        return name.replace(/^\d+[\s._-]*/, '').replace(/[_-]/g, ' ').trim() || name;
+        list.querySelectorAll('.tree-section-header').forEach(header => {
+            header.addEventListener('click', (e) => {
+                if (state.reorderMode) return;
+                if (e.target.closest('.drag-handle')) return;
+                const sectionId = header.dataset.sectionId;
+                toggleSection(sectionId);
+                const section = header.closest('.tree-section');
+                const children = section.querySelector('.tree-section-children');
+                const arrow = header.querySelector('.collapse-arrow');
+                children.classList.toggle('collapsed');
+                arrow.classList.toggle('collapsed');
+            });
+        });
     }
 
     // --- Lesson Reorder ---
 
     state.reorderMode = false;
     let dragItem = null;
+    let dragType = null; // 'section' or 'lesson'
 
     el('reorder-btn').addEventListener('click', () => {
         if (state.reorderMode) {
@@ -411,6 +493,12 @@
         el('reorder-controls').classList.remove('hidden');
         const list = el('lesson-list');
         list.classList.add('reorder-mode');
+
+        // Expand all sections for reordering
+        list.querySelectorAll('.tree-section-children.collapsed').forEach(c => c.classList.remove('collapsed'));
+        list.querySelectorAll('.collapse-arrow.collapsed').forEach(a => a.classList.remove('collapsed'));
+
+        // Make lessons draggable
         list.querySelectorAll('.lesson-item').forEach(item => {
             item.draggable = true;
             item.addEventListener('dragstart', onDragStart);
@@ -418,6 +506,16 @@
             item.addEventListener('dragleave', onDragLeave);
             item.addEventListener('drop', onDrop);
             item.addEventListener('dragend', onDragEnd);
+        });
+
+        // Make section headers draggable
+        list.querySelectorAll('.tree-section-header').forEach(header => {
+            header.draggable = true;
+            header.addEventListener('dragstart', onSectionDragStart);
+            header.addEventListener('dragover', onSectionDragOver);
+            header.addEventListener('dragleave', onDragLeave);
+            header.addEventListener('drop', onSectionDrop);
+            header.addEventListener('dragend', onDragEnd);
         });
     }
 
@@ -427,6 +525,7 @@
         el('reorder-controls').classList.add('hidden');
         const list = el('lesson-list');
         list.classList.remove('reorder-mode');
+
         list.querySelectorAll('.lesson-item').forEach(item => {
             item.draggable = false;
             item.removeEventListener('dragstart', onDragStart);
@@ -435,33 +534,65 @@
             item.removeEventListener('drop', onDrop);
             item.removeEventListener('dragend', onDragEnd);
         });
+
+        list.querySelectorAll('.tree-section-header').forEach(header => {
+            header.draggable = false;
+            header.removeEventListener('dragstart', onSectionDragStart);
+            header.removeEventListener('dragover', onSectionDragOver);
+            header.removeEventListener('dragleave', onDragLeave);
+            header.removeEventListener('drop', onSectionDrop);
+            header.removeEventListener('dragend', onDragEnd);
+        });
     }
 
     function onDragStart(e) {
         dragItem = this;
+        dragType = 'lesson';
         this.classList.add('dragging');
         e.dataTransfer.effectAllowed = 'move';
     }
 
+    function onSectionDragStart(e) {
+        dragItem = this.closest('.tree-section');
+        dragType = 'section';
+        dragItem.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+    }
+
     function onDragOver(e) {
+        if (dragType !== 'lesson') return;
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
-        if (this !== dragItem) {
+        // Only allow drop within same parent section
+        if (this !== dragItem && this.parentElement === dragItem.parentElement) {
             this.classList.add('drag-over');
+        }
+    }
+
+    function onSectionDragOver(e) {
+        if (dragType !== 'section') return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        const targetSection = this.closest('.tree-section');
+        if (targetSection !== dragItem && targetSection.parentElement === dragItem.parentElement) {
+            targetSection.classList.add('drag-over');
         }
     }
 
     function onDragLeave() {
         this.classList.remove('drag-over');
+        const sec = this.closest('.tree-section');
+        if (sec) sec.classList.remove('drag-over');
     }
 
     function onDrop(e) {
+        if (dragType !== 'lesson') return;
         e.preventDefault();
         this.classList.remove('drag-over');
-        if (this === dragItem) return;
+        if (this === dragItem || this.parentElement !== dragItem.parentElement) return;
 
-        const list = el('lesson-list');
-        const items = [...list.querySelectorAll('.lesson-item')];
+        const parent = this.parentElement;
+        const items = [...parent.querySelectorAll(':scope > .lesson-item')];
         const fromIdx = items.indexOf(dragItem);
         const toIdx = items.indexOf(this);
 
@@ -470,32 +601,74 @@
         } else {
             this.before(dragItem);
         }
+    }
 
-        // Update data-index attributes
-        list.querySelectorAll('.lesson-item').forEach((item, i) => {
-            item.dataset.index = i;
-        });
+    function onSectionDrop(e) {
+        if (dragType !== 'section') return;
+        e.preventDefault();
+        const targetSection = this.closest('.tree-section');
+        targetSection.classList.remove('drag-over');
+        if (targetSection === dragItem || targetSection.parentElement !== dragItem.parentElement) return;
+
+        const parent = targetSection.parentElement;
+        const siblings = [...parent.querySelectorAll(':scope > .tree-section')];
+        const fromIdx = siblings.indexOf(dragItem);
+        const toIdx = siblings.indexOf(targetSection);
+
+        if (fromIdx < toIdx) {
+            targetSection.after(dragItem);
+        } else {
+            targetSection.before(dragItem);
+        }
     }
 
     function onDragEnd() {
-        this.classList.remove('dragging');
-        el('lesson-list').querySelectorAll('.lesson-item').forEach(i => i.classList.remove('drag-over'));
+        if (dragItem) dragItem.classList.remove('dragging');
+        el('lesson-list').querySelectorAll('.lesson-item, .tree-section').forEach(i => i.classList.remove('drag-over'));
         dragItem = null;
+        dragType = null;
+    }
+
+    function buildOrderFromDOM() {
+        // Build structured order from current DOM state
+        const sectionOrder = {};
+        const lessonOrders = {};
+
+        function processContainer(container, parentId) {
+            const childSections = [...container.querySelectorAll(':scope > .tree-section')];
+            const childLessons = [...container.querySelectorAll(':scope > .lesson-item')];
+
+            if (childSections.length) {
+                sectionOrder[parentId] = childSections.map(s => {
+                    const id = s.dataset.sectionId;
+                    return id.includes('/') ? id.split('/').pop() : id;
+                });
+                childSections.forEach(s => {
+                    const childContainer = s.querySelector(':scope > .tree-section-children');
+                    if (childContainer) processContainer(childContainer, s.dataset.sectionId);
+                });
+            }
+
+            if (childLessons.length) {
+                lessonOrders[parentId] = childLessons.map(l => l.dataset.path);
+            }
+        }
+
+        processContainer(el('lesson-list'), '');
+        return { section_order: sectionOrder, lesson_orders: lessonOrders };
     }
 
     el('reorder-save').addEventListener('click', async () => {
         const course = state.currentCourse;
         if (!course) return;
 
-        const items = el('lesson-list').querySelectorAll('.lesson-item');
-        const order = [...items].map(item => item.dataset.path);
+        const order = buildOrderFromDOM();
 
         await api(`/api/lesson-order/${encodeURIComponent(course.path)}`, {
             method: 'PUT',
             body: { order },
         });
 
-        // Re-fetch courses to get the updated order
         exitReorderMode();
         const courses = await api('/api/courses');
         state.courses = courses || [];
@@ -540,7 +713,7 @@
         const lesson = course.lessons[index];
         state.currentLesson = lesson;
 
-        if (lesson.type === 'document') {
+        if (lesson.lessonType === 'document') {
             showDocument(lesson);
         } else {
             showVideo(lesson);
@@ -660,9 +833,30 @@
     });
 
     function updateLessonHighlight() {
-        el('lesson-list').querySelectorAll('.lesson-item').forEach((item, i) => {
-            item.classList.toggle('active', i === state.currentLessonIndex);
+        const list = el('lesson-list');
+        list.querySelectorAll('.lesson-item').forEach(item => {
+            item.classList.toggle('active', parseInt(item.dataset.index) === state.currentLessonIndex);
         });
+
+        // Auto-expand collapsed sections containing active lesson
+        const active = list.querySelector('.lesson-item.active');
+        if (active) {
+            let parent = active.parentElement;
+            while (parent && parent !== list) {
+                if (parent.classList.contains('tree-section-children') && parent.classList.contains('collapsed')) {
+                    parent.classList.remove('collapsed');
+                    const header = parent.previousElementSibling;
+                    if (header) {
+                        const arrow = header.querySelector('.collapse-arrow');
+                        if (arrow) arrow.classList.remove('collapsed');
+                        const sectionId = header.dataset.sectionId;
+                        if (sectionId) state.collapsedSections.delete(sectionId);
+                    }
+                }
+                parent = parent.parentElement;
+            }
+            if (state.currentCourse) saveCollapseState(state.currentCourse.path);
+        }
     }
 
     function updateCompletionBtn() {
@@ -831,7 +1025,7 @@
         const course = state.currentCourse;
         const lesson = state.currentLesson;
         if (!course || !lesson) return;
-        if (lesson.type === 'document' || !video.duration) return;
+        if (lesson.lessonType === 'document' || !video.duration) return;
 
         const prog = state.progress[lesson.path] || {};
         api('/api/progress', {
@@ -852,6 +1046,26 @@
         };
     }
 
+    function updateTreeProgress(tree) {
+        for (const node of tree) {
+            if (node.type === 'section') {
+                updateTreeProgress(node.children);
+                let total = 0, completed = 0;
+                function countNode(n) {
+                    if (n.type === 'section') n.children.forEach(countNode);
+                    else {
+                        total++;
+                        const p = state.progress[n.path];
+                        if (p && p.completed) completed++;
+                    }
+                }
+                node.children.forEach(countNode);
+                node.total = total;
+                node.completed = completed;
+            }
+        }
+    }
+
     function markComplete() {
         const course = state.currentCourse;
         const lesson = state.currentLesson;
@@ -862,7 +1076,7 @@
             completed: 1,
         };
 
-        const isDoc = lesson.type === 'document';
+        const isDoc = lesson.lessonType === 'document';
         api('/api/progress', {
             method: 'POST',
             body: {
@@ -875,6 +1089,7 @@
         });
 
         updateCompletionBtn();
+        updateTreeProgress(course.tree);
         renderLessonList(course);
     }
 
@@ -888,7 +1103,7 @@
             completed: 0,
         };
 
-        const isDoc = lesson.type === 'document';
+        const isDoc = lesson.lessonType === 'document';
         api('/api/progress', {
             method: 'POST',
             body: {
@@ -901,6 +1116,7 @@
         });
 
         updateCompletionBtn();
+        updateTreeProgress(course.tree);
         renderLessonList(course);
     }
 
@@ -917,7 +1133,7 @@
 
     function renderNotes(notes) {
         const list = el('notes-list');
-        const isDoc = state.currentLesson && state.currentLesson.type === 'document';
+        const isDoc = state.currentLesson && state.currentLesson.lessonType === 'document';
         if (!notes.length) {
             list.innerHTML = '<div style="padding:1rem;text-align:center;color:var(--text-muted);font-size:0.8rem;">No notes yet</div>';
             return;
@@ -963,7 +1179,7 @@
             body: {
                 course_path: state.currentCourse.path,
                 lesson_path: state.currentLesson.path,
-                timestamp: (state.currentLesson && state.currentLesson.type === 'document') ? 0 : (video.currentTime || 0),
+                timestamp: (state.currentLesson && state.currentLesson.lessonType === 'document') ? 0 : (video.currentTime || 0),
                 content,
             },
         });
@@ -1325,7 +1541,7 @@
     document.addEventListener('keydown', e => {
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
         if (!state.currentLesson) return;
-        if (state.currentLesson.type === 'document') return;
+        if (state.currentLesson.lessonType === 'document') return;
 
         switch (e.key) {
             case ' ':
