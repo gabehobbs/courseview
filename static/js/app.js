@@ -70,6 +70,10 @@
     const docTextContent = el('doc-text-content');
     const videoWrapper = qs('.video-wrapper');
     const playerControls = qs('.player-controls');
+    const volumeBtn = el('volume-btn');
+    const volumeSlider = el('volume-slider');
+    const volumeIcon = el('volume-icon');
+    const volumeMutedIcon = el('volume-muted-icon');
 
     // --- Views ---
 
@@ -790,6 +794,26 @@
         }
     });
 
+    // Volume
+    function updateVolumeUI() {
+        const muted = video.muted || video.volume === 0;
+        volumeIcon.classList.toggle('hidden', muted);
+        volumeMutedIcon.classList.toggle('hidden', !muted);
+        volumeSlider.value = video.muted ? 0 : video.volume;
+    }
+
+    volumeSlider.addEventListener('input', () => {
+        video.volume = parseFloat(volumeSlider.value);
+        video.muted = video.volume === 0;
+        updateVolumeUI();
+    });
+
+    volumeBtn.addEventListener('click', () => {
+        video.muted = !video.muted;
+        updateVolumeUI();
+        showOverlayIcon(video.muted ? '&#128263;' : '&#128266;');
+    });
+
     // Overlay
     function showOverlayIcon(html) {
         overlayIcon.innerHTML = html;
@@ -1332,6 +1356,7 @@
                 break;
             case 'm':
                 video.muted = !video.muted;
+                updateVolumeUI();
                 showOverlayIcon(video.muted ? '&#128263;' : '&#128266;');
                 break;
             case 'n':
