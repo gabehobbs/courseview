@@ -18,7 +18,7 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import bcrypt
 
-VERSION = '0.1.0'
+VERSION = '0.1.1'
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('COURSEVIEW_SECRET', secrets.token_hex(32))
@@ -1148,13 +1148,13 @@ def api_transcode_scan():
         scanned = 0
 
         # Send initial count
-        yield json.dumps({'type': 'progress', 'scanned': 0, 'total': total, 'found': 0}) + '\n'
+        yield json.dumps({'type': 'progress', 'scanned': 0, 'total': total, 'found': 0, 'file': ''}) + '\n'
 
         for video_file, lib_path in all_videos:
-            codec = _get_video_codec(video_file)
             scanned += 1
+            rel = str(video_file.relative_to(lib_path))
+            codec = _get_video_codec(video_file)
             if codec and codec not in BROWSER_VIDEO_CODECS:
-                rel = str(video_file.relative_to(lib_path))
                 transcoded = video_file.with_suffix('.transcoded.mp4')
                 backup = video_file.with_name(video_file.name + '.bak')
                 size_mb = round(video_file.stat().st_size / (1024 * 1024), 1)
@@ -1167,9 +1167,7 @@ def api_transcode_scan():
                     'has_backup': backup.exists(),
                 })
 
-            # Send progress every 5 files or on last file
-            if scanned % 5 == 0 or scanned == total:
-                yield json.dumps({'type': 'progress', 'scanned': scanned, 'total': total, 'found': len(incompatible)}) + '\n'
+            yield json.dumps({'type': 'progress', 'scanned': scanned, 'total': total, 'found': len(incompatible), 'file': rel}) + '\n'
 
         # Count backups
         backup_count = 0

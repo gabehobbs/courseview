@@ -1829,6 +1829,24 @@
         btn.textContent = 'Scanning...';
         el('transcode-msg').classList.add('hidden');
 
+        // Show scan progress UI
+        const msgEl = el('transcode-msg');
+        msgEl.classList.remove('hidden');
+        msgEl.innerHTML = `
+            <div class="scan-progress">
+                <div class="scan-progress-header">
+                    <span class="scan-progress-count">Collecting files...</span>
+                    <span class="scan-progress-found"></span>
+                </div>
+                <div class="transcode-progress-bar"><div class="transcode-progress-fill scan-progress-fill" style="width:0%"></div></div>
+                <div class="scan-progress-file"></div>
+            </div>`;
+
+        const countEl = msgEl.querySelector('.scan-progress-count');
+        const foundEl = msgEl.querySelector('.scan-progress-found');
+        const fillEl = msgEl.querySelector('.scan-progress-fill');
+        const fileEl = msgEl.querySelector('.scan-progress-file');
+
         try {
             const resp = await fetch('/api/transcode/scan');
             const reader = resp.body.getReader();
@@ -1846,7 +1864,11 @@
                     if (!line.trim()) continue;
                     const evt = JSON.parse(line);
                     if (evt.type === 'progress') {
-                        btn.textContent = `Scanning... ${evt.scanned}/${evt.total} (${evt.found} incompatible)`;
+                        const pct = evt.total > 0 ? Math.round((evt.scanned / evt.total) * 100) : 0;
+                        countEl.textContent = `${evt.scanned} / ${evt.total}`;
+                        foundEl.textContent = evt.found > 0 ? `${evt.found} incompatible` : '';
+                        fillEl.style.width = pct + '%';
+                        if (evt.file) fileEl.textContent = evt.file;
                     } else if (evt.type === 'done') {
                         data = evt;
                     }
