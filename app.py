@@ -18,6 +18,8 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import bcrypt
 
+VERSION = '1.0.0'
+
 app = Flask(__name__)
 app.secret_key = os.environ.get('COURSEVIEW_SECRET', secrets.token_hex(32))
 app.config.update(
@@ -504,7 +506,7 @@ def resolve_file_in_libraries(filepath, user_id, allowed_extensions):
 @app.route('/')
 @login_required
 def dashboard():
-    return render_template('index.html')
+    return render_template('index.html', version=VERSION)
 
 
 @app.route('/api/courses')

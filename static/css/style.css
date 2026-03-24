@@ -1244,6 +1244,14 @@ body {
     margin: 0 auto;
 }
 
+.settings-version {
+    text-align: center;
+    color: var(--text-tertiary);
+    font-size: 0.75rem;
+    padding: 1.5rem 0 1rem;
+    opacity: 0.6;
+}
+
 .settings-section {
     margin-bottom: 2rem;
 }
