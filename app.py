@@ -18,7 +18,7 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import bcrypt
 
-VERSION = '1.0.0'
+VERSION = '0.1.0'
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('COURSEVIEW_SECRET', secrets.token_hex(32))
